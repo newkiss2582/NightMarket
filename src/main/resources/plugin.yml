@@ -1,0 +1,19 @@
+name: NightMarket
+main: luludev.com.NightMarket
+version: 1.1.0
+api-version: 1.21
+author: LULUDEV
+
+depend: [Vault]
+
+commands:
+  nightmarket:
+    description: Night Market commands
+    usage: /nightmarket
+    aliases: [nm]
+
+permissions:
+  nightmarket.admin:
+    default: op
+  nightmarket.use:
+    default: true

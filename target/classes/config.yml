@@ -1,0 +1,33 @@
+market:
+  size: 27                # ขนาด GUI Night Market (ต้องหาร 9 ลงตัว)
+  random-count: 9         # จำนวนช่องที่แสดงต่อวัน
+  refresh-time: "08:00"   # เวลารีเฟรชประจำวัน (HH:mm)
+  one-purchase-per-day: true
+
+  # ช่วงสุ่มราคาทั่วไป (ถ้า pool ไม่ override)
+  price:
+    min: 500
+    max: 2000
+
+pools:
+  default:
+    size: 54          # ขนาดหน้า edit pool
+    price-min: 500    # ถ้าไม่เซ็ต จะ fallback ไปใช้ market.price.min
+    price-max: 2000   # ถ้าไม่เซ็ต จะ fallback ไปใช้ market.price.max
+
+messages:
+  prefix: "&8[&dNightMarket&8] "
+  no-permission: "&cคุณไม่มีสิทธิ์ใช้คำสั่งนี้"
+  only-player: "&cใช้คำสั่งนี้ได้เฉพาะในเกมเท่านั้น"
+  pool-empty: "&cPool นี้ยังไม่มีของ! ใช้ /nightmarket edit {pool}"
+  already-bought-today: "&cวันนี้คุณซื้อใน Night Market นี้ไปแล้ว กลับมาใหม่พรุ่งนี้!"
+  not-enough-money: "&cเงินไม่เพียงพอ ต้องการ &e{price}"
+  buy-success: "&aคุณซื้อ &f{item}&a ในราคา &e{price}"
+  inventory-full: "&cช่องในกระเป๋าเต็ม เคลียร์ของก่อน"
+  daily-refreshed: "&aNight Market ถูกรีเฟรชประจำวันที่ &e{date}&a แล้ว"
+  unknown-pool: "&cไม่พบ pool ชื่อ &e{pool}"
+  reload-success: "&aรีโหลด config และข้อมูล Night Market แล้ว"
+
+daily:
+  last-refresh-date: ""  # จะถูกเขียนอัตโนมัติ
+  # daily.pools.<pool>.items / prices จะถูกเขียนโดยปลั๊กอิน
