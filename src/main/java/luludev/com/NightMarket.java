@@ -1,8 +1,10 @@
 package luludev.com;
 
-import luludev.com.managers.NightMarketManager;
-import luludev.com.managers.PurchaseDatabase;
 import luludev.com.listeners.NightMarketListener;
+import luludev.com.listeners.PriceEditorListener;
+import luludev.com.managers.NightMarketManager;
+import luludev.com.managers.PoolsConfig;
+import luludev.com.managers.PurchaseDatabase;
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.RegisteredServiceProvider;
@@ -15,38 +17,52 @@ public class NightMarket extends JavaPlugin {
 
     private NightMarketManager nightMarketManager;
     private PurchaseDatabase purchaseDatabase;
+    private PoolsConfig poolsConfig;
 
     @Override
     public void onEnable() {
         instance = this;
 
+        // โหลด config.yml ถ้ายังไม่มีจะ copy จาก resources
         saveDefaultConfig();
 
+        // ตั้งค่า Vault Economy
         if (!setupEconomy()) {
-            getLogger().severe("Vault/Economy not found! Disabling NightMarket...");
+            getLogger().severe("ไม่พบ Vault หรือ Economy provider ปลั๊กอินจะถูกปิด!");
             Bukkit.getPluginManager().disablePlugin(this);
             return;
         }
 
-        // DB
+        // ฐานข้อมูล (SQLite) สำหรับเก็บ log การซื้อ
         purchaseDatabase = new PurchaseDatabase(this);
         purchaseDatabase.init();
 
-        // Manager
-        nightMarketManager = new NightMarketManager(this, purchaseDatabase);
+        // ไฟล์ pools.yml สำหรับเก็บข้อมูล pool + ราคา min/max
+        poolsConfig = new PoolsConfig(this);
 
-        // Commands
+        // ตัวจัดการระบบ Night Market
+        nightMarketManager = new NightMarketManager(this, purchaseDatabase, poolsConfig);
+
+        // คำสั่ง /nightmarket
         NightMarketCommand command = new NightMarketCommand(this, nightMarketManager);
-        getCommand("nightmarket").setExecutor(command);
-        getCommand("nightmarket").setTabCompleter(command);
+        if (getCommand("nightmarket") != null) {
+            getCommand("nightmarket").setExecutor(command);
+            getCommand("nightmarket").setTabCompleter(command);
+        } else {
+            getLogger().warning("ไม่พบคำสั่ง 'nightmarket' ใน plugin.yml");
+        }
 
-        // Listeners
+        // ลงทะเบียน Listener ต่าง ๆ
         getServer().getPluginManager().registerEvents(
-                new NightMarketListener(nightMarketManager),
+                new NightMarketListener(this, nightMarketManager),
+                this
+        );
+        getServer().getPluginManager().registerEvents(
+                new PriceEditorListener(this),
                 this
         );
 
-        // Daily market
+        // สร้าง / โหลดตลาดประจำวัน + ตั้ง schedule รีเฟรชทุกวัน
         nightMarketManager.initDailyMarket();
 
         getLogger().info("NightMarket enabled.");
@@ -60,6 +76,8 @@ public class NightMarket extends JavaPlugin {
         getLogger().info("NightMarket disabled.");
     }
 
+    // ================== Vault / Economy ==================
+
     private boolean setupEconomy() {
         if (getServer().getPluginManager().getPlugin("Vault") == null) {
             return false;
@@ -71,13 +89,15 @@ public class NightMarket extends JavaPlugin {
         return economy != null;
     }
 
+    public static Economy getEconomy() {
+        return economy;
+    }
+
     public static NightMarket getInstance() {
         return instance;
     }
 
-    public static Economy getEconomy() {
-        return economy;
-    }
+    // ================== Getters อื่น ๆ ==================
 
     public NightMarketManager getNightMarketManager() {
         return nightMarketManager;
@@ -85,5 +105,9 @@ public class NightMarket extends JavaPlugin {
 
     public PurchaseDatabase getPurchaseDatabase() {
         return purchaseDatabase;
+    }
+
+    public PoolsConfig getPoolsConfig() {
+        return poolsConfig;
     }
 }

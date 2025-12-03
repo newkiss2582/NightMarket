@@ -4,7 +4,6 @@ import luludev.com.NightMarket;
 import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
@@ -37,16 +36,18 @@ public class NightMarketManager {
 
     private final NightMarket plugin;
     private final PurchaseDatabase database;
+    private final PoolsConfig poolsConfig;
 
     private final String EDIT_TITLE_PREFIX = ChatColor.DARK_PURPLE + "Edit Pool: ";
     private final String MARKET_TITLE_PREFIX = ChatColor.GOLD + "Night Market: ";
 
-    // pool -> รายการของวันนี้
+    // pool(lowercase) -> รายการของ "วันนี้" (เก็บแค่ใน memory)
     private final Map<String, List<MarketEntry>> dailyMarkets = new HashMap<>();
 
-    public NightMarketManager(NightMarket plugin, PurchaseDatabase database) {
+    public NightMarketManager(NightMarket plugin, PurchaseDatabase database, PoolsConfig poolsConfig) {
         this.plugin = plugin;
         this.database = database;
+        this.poolsConfig = poolsConfig;
     }
 
     public String getEditTitle(String pool) {
@@ -57,11 +58,13 @@ public class NightMarketManager {
         return MARKET_TITLE_PREFIX + pool;
     }
 
-    // ================== CONFIG ==================
-
     private FileConfiguration cfg() {
         return plugin.getConfig();
     }
+
+    // ======================================================
+    // CONFIG VALUE
+    // ======================================================
 
     public int getMarketSize() {
         int size = cfg().getInt("market.size", 27);
@@ -77,16 +80,13 @@ public class NightMarketManager {
         return cfg().getBoolean("market.one-purchase-per-day", true);
     }
 
-    public double getPriceMin(String pool) {
-        double min = cfg().getDouble("pools." + pool + ".price-min",
-                cfg().getDouble("market.price.min", 500.0));
-        return Math.max(min, 0);
+    /** default min/max ถ้ายังไม่ตั้ง per-item */
+    public double getDefaultPriceMin() {
+        return Math.max(cfg().getDouble("market.price.min", 500.0), 0);
     }
 
-    public double getPriceMax(String pool) {
-        double max = cfg().getDouble("pools." + pool + ".price-max",
-                cfg().getDouble("market.price.max", 2000.0));
-        return Math.max(max, 0);
+    public double getDefaultPriceMax() {
+        return Math.max(cfg().getDouble("market.price.max", 2000.0), 0);
     }
 
     public String getMessage(String key) {
@@ -101,140 +101,141 @@ public class NightMarketManager {
         return String.format(Locale.US, "%.0f", price);
     }
 
-    // ================== POOL ITEMS ==================
+    // ======================================================
+    // EDIT POOL GUI (อ่าน/เขียนจาก pools.yml เท่านั้น)
+    // ======================================================
 
-    public List<ItemStack> getPoolItems(String pool) {
-        ConfigurationSection poolSection = cfg().getConfigurationSection("pools." + pool);
-        List<ItemStack> result = new ArrayList<>();
-        if (poolSection == null) return result;
+    public void openEditPoolGUI(Player player, String pool) {
+        int size = cfg().getInt("pools." + pool + ".size", 54);
+        if (size % 9 != 0) size = 54;
 
-        List<?> rawList = poolSection.getList("items");
-        if (rawList != null) {
-            for (Object o : rawList) {
-                if (o instanceof ItemStack) {
-                    result.add(((ItemStack) o).clone());
-                }
+        Inventory inv = Bukkit.createInventory(null, size, getEditTitle(pool));
+
+        Map<Integer, PoolsConfig.PoolItem> poolItems = poolsConfig.getItems(pool);
+        for (Map.Entry<Integer, PoolsConfig.PoolItem> e : poolItems.entrySet()) {
+            int slot = e.getKey();
+            if (slot < 0 || slot >= size) continue;
+
+            PoolsConfig.PoolItem pItem = e.getValue();
+            ItemStack item = pItem.getItem().clone();
+
+            // แสดง min/max ไว้ใน lore ให้เห็นตอน edit
+            ItemMeta meta = item.getItemMeta();
+            if (meta != null) {
+                List<String> lore = meta.hasLore() ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+                lore.add(ChatColor.GRAY + "Min: " + ChatColor.GOLD + formatPrice(pItem.getMin()));
+                lore.add(ChatColor.GRAY + "Max: " + ChatColor.GOLD + formatPrice(pItem.getMax()));
+                meta.setLore(lore);
+                item.setItemMeta(meta);
             }
+
+            inv.setItem(slot, item);
         }
-        return result;
+
+        player.openInventory(inv);
     }
 
+    /** เซฟของจากหน้า Edit Pool กลับไปที่ pools.yml (ไม่ยุ่ง config.yml) */
     public void savePoolItems(String pool, ItemStack[] contents) {
-        List<ItemStack> list = new ArrayList<>();
-        for (ItemStack item : contents) {
-            if (item != null) list.add(item.clone());
+        poolsConfig.clearPool(pool);
+
+        for (int slot = 0; slot < contents.length; slot++) {
+            ItemStack item = contents[slot];
+            if (item == null) continue;
+
+            // ถ้ามีราคาเดิมอยู่แล้วก็ใช้ต่อ ไม่งั้นใช้ default
+            PoolsConfig.PoolItem old = poolsConfig.getItem(pool, slot);
+            double min = old != null ? old.getMin() : getDefaultPriceMin();
+            double max = old != null ? old.getMax() : getDefaultPriceMax();
+
+            poolsConfig.setItem(pool, slot, item.clone(), min, max);
         }
-        cfg().set("pools." + pool + ".items", list);
-        plugin.saveConfig();
+
+        poolsConfig.save();
     }
 
-    // ================== DAILY MARKET ==================
+    // ======================================================
+    // DAILY MARKET (เก็บแค่ใน memory + สุ่มใหม่ทุกวัน)
+    // ======================================================
 
+    /** เรียกตอน onEnable: สุ่มตลาดรอบแรก + ตั้ง schedule 8:00 */
     public void initDailyMarket() {
-        String lastDate = cfg().getString("daily.last-refresh-date", "");
-        String today = LocalDate.now().toString();
+        // สุ่มตลาดทันทีตอนเปิดปลั๊กอิน
+        refreshDailyMarket();
 
-        if (!today.equals(lastDate)) {
-            refreshDailyMarket();
-        } else {
-            loadDailyFromConfig();
-        }
-
+        // ตั้งเวลาให้สุ่มใหม่ทุกวัน
         scheduleDailyRefresh();
     }
 
-    private void loadDailyFromConfig() {
-        dailyMarkets.clear();
-        ConfigurationSection poolsSec = cfg().getConfigurationSection("daily.pools");
-        if (poolsSec == null) return;
-
-        for (String pool : poolsSec.getKeys(false)) {
-            ConfigurationSection poolSec = poolsSec.getConfigurationSection(pool);
-            if (poolSec == null) continue;
-
-            List<?> itemsRaw = poolSec.getList("items");
-            List<?> pricesRaw = poolSec.getList("prices");
-
-            if (itemsRaw == null || pricesRaw == null) continue;
-            List<MarketEntry> entries = new ArrayList<>();
-
-            for (int i = 0; i < itemsRaw.size() && i < pricesRaw.size(); i++) {
-                Object itemObj = itemsRaw.get(i);
-                Object priceObj = pricesRaw.get(i);
-                if (!(itemObj instanceof ItemStack)) continue;
-                double price;
-                if (priceObj instanceof Number) {
-                    price = ((Number) priceObj).doubleValue();
-                } else {
-                    continue;
-                }
-                entries.add(new MarketEntry(((ItemStack) itemObj).clone(), price));
-            }
-
-            dailyMarkets.put(pool.toLowerCase(Locale.ROOT), entries);
-        }
-    }
-
+    /** สุ่มรายการขายของแต่ละ pool สำหรับ "วันนี้" (memory only) */
     public void refreshDailyMarket() {
         dailyMarkets.clear();
 
-        ConfigurationSection poolsSec = cfg().getConfigurationSection("pools");
-        if (poolsSec == null) return;
-
-        for (String pool : poolsSec.getKeys(false)) {
-            List<ItemStack> poolItems = getPoolItems(pool);
-            if (poolItems.isEmpty()) continue;
-
-            int size = getMarketSize();
-            int randomCount = getMarketRandomCount();
-            if (randomCount > size) randomCount = size;
-            if (randomCount > poolItems.size()) randomCount = poolItems.size();
-
-            List<ItemStack> shuffled = new ArrayList<>(poolItems);
-            Collections.shuffle(shuffled);
-
-            double min = getPriceMin(pool);
-            double max = getPriceMax(pool);
-            if (max < min) {
-                double tmp = min;
-                min = max;
-                max = tmp;
-            }
-
-            List<MarketEntry> entries = new ArrayList<>();
-            Random rand = new Random();
-
-            for (int i = 0; i < randomCount; i++) {
-                ItemStack original = shuffled.get(i).clone();
-                double price = min + (max - min) * rand.nextDouble();
-
-                ItemMeta meta = original.getItemMeta();
-                if (meta != null) {
-                    List<String> lore = meta.hasLore() ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
-                    lore.add(ChatColor.YELLOW + "ราคา: " + ChatColor.GOLD + formatPrice(price));
-                    meta.setLore(lore);
-                    original.setItemMeta(meta);
-                }
-
-                entries.add(new MarketEntry(original, price));
-            }
-
-            dailyMarkets.put(pool.toLowerCase(Locale.ROOT), entries);
-
-            cfg().set("daily.pools." + pool + ".items",
-                    entries.stream().map(MarketEntry::getItem).toList());
-            cfg().set("daily.pools." + pool + ".prices",
-                    entries.stream().map(MarketEntry::getPrice).toList());
+        Set<String> pools = poolsConfig.getAllPools();
+        if (pools.isEmpty()) {
+            plugin.getLogger().warning("NightMarket: ไม่พบ pool ใดใน pools.yml");
+            return;
         }
 
-        cfg().set("daily.last-refresh-date", LocalDate.now().toString());
-        plugin.saveConfig();
+        for (String pool : pools) {
+            generateDailyMarketForPool(pool);
+        }
 
         String msg = getMessage("daily-refreshed")
                 .replace("{date}", LocalDate.now().toString());
         Bukkit.getOnlinePlayers().forEach(p -> p.sendMessage(msg));
     }
 
+    /** สุ่มตลาดจาก pool หนึ่ง (ใช้ข้อมูลจาก pools.yml เท่านั้น) */
+    private void generateDailyMarketForPool(String pool) {
+        Map<Integer, PoolsConfig.PoolItem> items = poolsConfig.getItems(pool);
+        if (items.isEmpty()) return;
+
+        int size = getMarketSize();
+        int randomCount = getMarketRandomCount();
+        if (randomCount > size) randomCount = size;
+        if (randomCount > items.size()) randomCount = items.size();
+
+        List<PoolsConfig.PoolItem> list = new ArrayList<>(items.values());
+        Collections.shuffle(list);
+
+        List<MarketEntry> entries = new ArrayList<>();
+        Random rand = new Random();
+
+        for (int i = 0; i < randomCount; i++) {
+            PoolsConfig.PoolItem pItem = list.get(i);
+            ItemStack original = pItem.getItem().clone();
+
+            double min = pItem.getMin();
+            double max = pItem.getMax();
+            if (min <= 0 && max <= 0) {
+                min = getDefaultPriceMin();
+                max = getDefaultPriceMax();
+            }
+            if (max < min) {
+                double t = min;
+                min = max;
+                max = t;
+            }
+
+            double price = min + (max - min) * rand.nextDouble();
+
+            ItemMeta meta = original.getItemMeta();
+            if (meta != null) {
+                List<String> lore = meta.hasLore() ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+                lore.add(ChatColor.YELLOW + "ราคา: " + ChatColor.GOLD + formatPrice(price));
+                meta.setLore(lore);
+                original.setItemMeta(meta);
+            }
+
+            entries.add(new MarketEntry(original, price));
+        }
+
+        String key = pool.toLowerCase(Locale.ROOT);
+        dailyMarkets.put(key, entries);
+    }
+
+    /** ตั้ง schedule ให้สุ่มใหม่ทุกวันตามเวลาใน config (market.refresh-time) */
     private void scheduleDailyRefresh() {
         String timeStr = cfg().getString("market.refresh-time", "08:00");
         LocalTime targetTime;
@@ -253,7 +254,7 @@ public class NightMarketManager {
             next = next.plusDays(1);
         }
 
-        long initialDelaySeconds = java.time.Duration.between(now, next).toSeconds();
+        long initialDelaySeconds = Duration.between(now, next).toSeconds();
         long periodSeconds = 24 * 60 * 60;
 
         long initialDelayTicks = initialDelaySeconds * 20L;
@@ -267,29 +268,16 @@ public class NightMarketManager {
         );
     }
 
-    // ================== GUI ==================
-
-    public void openEditPoolGUI(Player player, String pool) {
-        int size = cfg().getInt("pools." + pool + ".size", 54);
-        if (size % 9 != 0) size = 54;
-
-        Inventory inv = Bukkit.createInventory(null, size, getEditTitle(pool));
-
-        List<ItemStack> poolItems = getPoolItems(pool);
-        int index = 0;
-        for (ItemStack item : poolItems) {
-            if (index >= size) break;
-            inv.setItem(index++, item);
-        }
-
-        player.openInventory(inv);
-    }
+    // ======================================================
+    // NIGHT MARKET GUI (ฝั่งคนซื้อ)
+    // ======================================================
 
     public void openMarketGUI(Player player, String pool) {
         String key = pool.toLowerCase(Locale.ROOT);
+
+        // ถ้ายังไม่มีตลาดของ pool นี้ (เช่น เพิ่งสร้าง pool ใหม่)
         if (!dailyMarkets.containsKey(key)) {
-            player.sendMessage(getMessage("unknown-pool").replace("{pool}", pool));
-            return;
+            generateDailyMarketForPool(pool);
         }
 
         List<MarketEntry> entries = dailyMarkets.get(key);

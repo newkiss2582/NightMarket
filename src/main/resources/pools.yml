@@ -1,0 +1,11 @@
+pools:
+  default:
+    items:
+      0:
+        item: <ItemStack serialized>
+        min: 500
+        max: 2000
+      10:
+        item: <อีกชิ้น>
+        min: 1000
+        max: 5000
